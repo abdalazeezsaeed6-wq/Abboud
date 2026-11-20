@@ -1,0 +1,21 @@
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+*.iml
+.idea/
+.DS_Store
+
+# Generated packages
+*.apk
+*.aab
+
+# Signing material and secrets
+*.jks
+*.keystore
+secrets.properties
+keystore.properties
+
+# Large local language models are not stored in Git
+brain/models/*.gguf
+brain/models/*.bin
