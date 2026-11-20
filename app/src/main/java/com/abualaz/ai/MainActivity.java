@@ -3,6 +3,7 @@ package com.abualaz.ai;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.ProgressDialog;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -29,6 +30,7 @@ import android.widget.Toast;
 
 import org.json.JSONArray;
 
+import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -50,6 +52,8 @@ public class MainActivity extends Activity {
     private AudioManager audioManager;
     private boolean ttsReady = false;
     private SecureConfigStore secureConfig;
+    private File localModelFile;
+    private LocalBrainEngine localBrain;
     private final ExecutorService brainExecutor = Executors.newSingleThreadExecutor();
 
     @Override
@@ -62,6 +66,7 @@ public class MainActivity extends Activity {
 
         preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         secureConfig = new SecureConfigStore(this);
+        localModelFile = LocalModelDownloader.modelFile(getFilesDir());
         audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
         initializeSpeech();
         buildInterface();
@@ -197,33 +202,82 @@ public class MainActivity extends Activity {
     private void handleUserMessage(String message) {
         addMessage(message, true);
 
-        if (isLocalCommand(message) || !secureConfig.isCloudEnabled()) {
+        if (isLocalCommand(message)) {
             String response = createBasicResponse(message);
             addMessage(response, false);
             speak(response);
             return;
         }
 
-        addMessage("جارٍ التفكير والبحث عن إجابة...", false);
+        boolean cloudForThisQuestion = secureConfig.isCloudEnabled()
+                && requiresCloud(message);
+        if (cloudForThisQuestion || !localModelFile.exists()) {
+            if (secureConfig.isCloudEnabled()) {
+                askCloud(message);
+            } else {
+                String response = localModelFile.exists()
+                        ? "العقل المحلي موجود، جارٍ تجهيزه..."
+                        : "لم يتم تنزيل العقل المحلي بعد. افتح الإعدادات ثم اختر تحميل العقل المحلي. ويمكنك إعداد العقل السحابي للأسئلة المتقدمة.";
+                if (localModelFile.exists()) {
+                    askLocal(message);
+                } else {
+                    addMessage(response, false);
+                    speak(response);
+                }
+            }
+            return;
+        }
+        askLocal(message);
+    }
+
+    private boolean requiresCloud(String message) {
+        String s = message.toLowerCase(Locale.ROOT);
+        String[] markers = {"بحث عميق", "تحليل معمق", "حلل بالتفصيل", "ابحث في الإنترنت",
+                "برمج", "اكتب كود", "قارن بالتفصيل", "خطة شاملة", "استعمل العقل السحابي"};
+        for (String marker : markers) if (s.contains(marker)) return true;
+        return false;
+    }
+
+    private void askCloud(String message) {
+        addMessage("أستخدم العقل السحابي لهذا السؤال...", false);
         brainExecutor.execute(() -> {
             String response;
             try {
-                String key = secureConfig.getApiKey();
-                response = CloudBrainClient.ask(
-                        secureConfig.getEndpoint(),
-                        secureConfig.getModel(),
-                        key,
-                        message
-                );
+                response = CloudBrainClient.ask(secureConfig.getEndpoint(),
+                        secureConfig.getModel(), secureConfig.getApiKey(), message);
             } catch (Exception error) {
-                response = "تعذر الوصول إلى العقل السحابي: " + error.getMessage()
-                        + "\\nيمكنك متابعة الأوامر المحلية أو مراجعة إعدادات الاتصال.";
+                response = "تعذر الوصول إلى العقل السحابي: " + error.getMessage();
             }
-            final String finalResponse = response;
-            runOnUiThread(() -> {
-                addMessage(finalResponse, false);
-                speak(finalResponse);
-            });
+            final String answer = response;
+            runOnUiThread(() -> { addMessage(answer, false); speak(answer); });
+        });
+    }
+
+    private void askLocal(String message) {
+        addMessage("عبود يفكر محلياً على الهاتف...", false);
+        brainExecutor.execute(() -> {
+            String response;
+            try {
+                if (localBrain == null) {
+                    LocalBrainEngine engine = new LocalBrainEngine(
+                            localModelFile.getAbsolutePath(), getCacheDir().getAbsolutePath());
+                    engine.load();
+                    localBrain = engine;
+                }
+                response = localBrain.ask(message);
+            } catch (Exception error) {
+                response = "تعذر تشغيل العقل المحلي: " + error.getMessage();
+                if (secureConfig.isCloudEnabled()) {
+                    try {
+                        response = CloudBrainClient.ask(secureConfig.getEndpoint(),
+                                secureConfig.getModel(), secureConfig.getApiKey(), message);
+                    } catch (Exception cloudError) {
+                        response += "\\nوالعقل السحابي غير متاح: " + cloudError.getMessage();
+                    }
+                }
+            }
+            final String answer = response;
+            runOnUiThread(() -> { addMessage(answer, false); speak(answer); });
         });
     }
 
@@ -522,6 +576,7 @@ public class MainActivity extends Activity {
                 "إيقاف الرد الصوتي",
                 "تشغيل الرد الصوتي",
                 "إعداد العقل السحابي",
+                "تحميل العقل المحلي",
                 "حذف الذاكرة المحفوظة",
                 "حول هذه النسخة"
         };
@@ -547,11 +602,13 @@ public class MainActivity extends Activity {
                     } else if (which == 2) {
                         showCloudSettings();
                     } else if (which == 3) {
+                        showLocalBrainSettings();
+                    } else if (which == 4) {
                         confirmMemoryDeletion();
                     } else {
                         new AlertDialog.Builder(this)
                                 .setTitle("عبود 0.2.0")
-                                .setMessage("نسخة أولية بواجهة عربية، تعرف صوتي عبر خدمة الهاتف، نطق عربي حسب محرك الجهاز، وأوامر أساسية وذاكرة ملاحظات محلية. لا تحتوي هذه النسخة بعد على نموذج ذكاء اصطناعي محلي أو سحابي.")
+                                .setMessage("نسخة تطويرية بواجهة عربية، أوامر محلية، ذاكرة خاصة، محرك ذكاء محلي قابل للتنزيل، واتصال سحابي اختياري. جودة الصوت تعتمد على محرك الهاتف.")
                                 .setPositiveButton("حسناً", null)
                                 .show();
                     }
@@ -613,9 +670,78 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    private void showLocalBrainSettings() {
+        if (localModelFile.exists()) {
+            new AlertDialog.Builder(this)
+                    .setTitle("العقل المحلي جاهز للتشغيل")
+                    .setMessage("تم العثور على ملف Qwen3 المحلي. سيُحمّل إلى الذاكرة عند أول سؤال، وقد يستغرق التحميل الأول بعض الوقت.")
+                    .setNegativeButton("إغلاق", null)
+                    .setPositiveButton("تهيئة العقل", (d, w) -> loadLocalBrain())
+                    .show();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("تنزيل العقل المحلي Qwen3")
+                .setMessage("حجم النموذج نحو 329 ميجابايت. يلزم اتصال Wi-Fi ومساحة فارغة لا تقل عن 600 ميجابايت. سيُحفظ داخل مساحة التطبيق الخاصة، ولن يُضاف إلى APK أو GitHub. التنزيل اختياري ويمكنك استخدام العقل السحابي بدلاً منه.")
+                .setNegativeButton("لاحقاً", null)
+                .setPositiveButton("تنزيل النموذج", (d, w) -> downloadLocalBrain())
+                .show();
+    }
+
+    private void downloadLocalBrain() {
+        ProgressDialog progress = new ProgressDialog(this);
+        progress.setTitle("تنزيل عقل عبود");
+        progress.setMessage("جارٍ تنزيل نموذج Qwen3، يرجى إبقاء الاتصال مستقراً...");
+        progress.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
+        progress.setMax(100);
+        progress.setProgress(0);
+        progress.setCancelable(false);
+        progress.show();
+        brainExecutor.execute(() -> {
+            try {
+                LocalModelDownloader.download(getFilesDir(), percent ->
+                        runOnUiThread(() -> progress.setProgress(percent)));
+                runOnUiThread(() -> {
+                    progress.dismiss();
+                    Toast.makeText(this, "اكتمل تنزيل العقل المحلي.", Toast.LENGTH_LONG).show();
+                    loadLocalBrain();
+                });
+            } catch (Exception error) {
+                runOnUiThread(() -> {
+                    progress.dismiss();
+                    new AlertDialog.Builder(this).setTitle("تعذر تنزيل النموذج")
+                            .setMessage(error.getMessage()).setPositiveButton("حسناً", null).show();
+                });
+            }
+        });
+    }
+
+    private void loadLocalBrain() {
+        Toast.makeText(this, "جارٍ تهيئة العقل المحلي في الخلفية...", Toast.LENGTH_LONG).show();
+        brainExecutor.execute(() -> {
+            try {
+                if (localBrain == null) {
+                    LocalBrainEngine engine = new LocalBrainEngine(
+                            localModelFile.getAbsolutePath(), getCacheDir().getAbsolutePath());
+                    engine.load();
+                    localBrain = engine;
+                }
+                runOnUiThread(() -> Toast.makeText(this, "العقل المحلي أصبح جاهزاً.", Toast.LENGTH_LONG).show());
+            } catch (Exception error) {
+                runOnUiThread(() -> new AlertDialog.Builder(this).setTitle("فشل تشغيل العقل المحلي")
+                        .setMessage(error.getMessage()).setPositiveButton("حسناً", null).show());
+            }
+        });
+    }
+
     @Override
     protected void onDestroy() {
-        brainExecutor.shutdownNow();
+        if (localBrain != null) {
+            LocalBrainEngine brain = localBrain;
+            localBrain = null;
+            brainExecutor.execute(() -> { try { brain.close(); } catch (Exception ignored) {} });
+        }
+        brainExecutor.shutdown();
         if (textToSpeech != null) {
             textToSpeech.stop();
             textToSpeech.shutdown();
