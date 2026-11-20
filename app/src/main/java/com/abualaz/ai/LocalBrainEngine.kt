@@ -48,7 +48,7 @@ class LocalBrainEngine(
 
     fun ask(prompt: String): String {
         val active = conversation ?: throw IllegalStateException("العقل المحلي غير محمّل.")
-        return active.sendMessage(prompt).trim()
+        return active.sendMessage(prompt).toString().trim()
     }
 
     override fun close() {
