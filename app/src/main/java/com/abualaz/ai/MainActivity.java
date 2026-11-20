@@ -20,6 +20,7 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -32,6 +33,8 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
 
@@ -46,6 +49,8 @@ public class MainActivity extends Activity {
     private TextToSpeech textToSpeech;
     private AudioManager audioManager;
     private boolean ttsReady = false;
+    private SecureConfigStore secureConfig;
+    private final ExecutorService brainExecutor = Executors.newSingleThreadExecutor();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -56,6 +61,7 @@ public class MainActivity extends Activity {
         window.setNavigationBarColor(Color.rgb(11, 20, 36));
 
         preferences = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        secureConfig = new SecureConfigStore(this);
         audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
         initializeSpeech();
         buildInterface();
@@ -190,9 +196,52 @@ public class MainActivity extends Activity {
 
     private void handleUserMessage(String message) {
         addMessage(message, true);
-        String response = createBasicResponse(message);
-        addMessage(response, false);
-        speak(response);
+
+        if (isLocalCommand(message) || !secureConfig.isCloudEnabled()) {
+            String response = createBasicResponse(message);
+            addMessage(response, false);
+            speak(response);
+            return;
+        }
+
+        addMessage("جارٍ التفكير والبحث عن إجابة...", false);
+        brainExecutor.execute(() -> {
+            String response;
+            try {
+                String key = secureConfig.getApiKey();
+                response = CloudBrainClient.ask(
+                        secureConfig.getEndpoint(),
+                        secureConfig.getModel(),
+                        key,
+                        message
+                );
+            } catch (Exception error) {
+                response = "تعذر الوصول إلى العقل السحابي: " + error.getMessage()
+                        + "\\nيمكنك متابعة الأوامر المحلية أو مراجعة إعدادات الاتصال.";
+            }
+            final String finalResponse = response;
+            runOnUiThread(() -> {
+                addMessage(finalResponse, false);
+                speak(finalResponse);
+            });
+        });
+    }
+
+    private boolean isLocalCommand(String message) {
+        String s = message.toLowerCase(Locale.ROOT);
+        String[] keys = {
+                "احفظ ", "تذكر ", "ماذا حفظت", "ما حفظت", "اذكر ما حفظت",
+                "ماذا تتذكر", "امسح ذاكرتك", "احذف الذاكرة",
+                "افتح الإعدادات", "افتح الاعدادات", "ارفع الصوت", "زد الصوت",
+                "اخفض الصوت", "خفض الصوت", "قلل الصوت", "افتح واتساب",
+                "افتح يوتيوب", "افتح الهاتف", "افتح الاتصال", "افتح الكاميرا",
+                "افتح المتصفح", "كم الساعة", "الوقت الآن", "ما التاريخ",
+                "تاريخ اليوم", "اتصل على", "اتصل بأ", "أرسل رسالة",
+                "ارسل رسالة", "السلام عليكم", "مرحبا", "هلا", "يا عبود",
+                "من أنت", "من انت"
+        };
+        for (String key : keys) if (s.contains(key)) return true;
+        return false;
     }
 
     private String createBasicResponse(String message) {
@@ -472,6 +521,7 @@ public class MainActivity extends Activity {
         String[] items = {
                 "إيقاف الرد الصوتي",
                 "تشغيل الرد الصوتي",
+                "إعداد العقل السحابي",
                 "حذف الذاكرة المحفوظة",
                 "حول هذه النسخة"
         };
@@ -495,10 +545,12 @@ public class MainActivity extends Activity {
                                 "الصوت العربي غير متوفر في محرك النطق الحالي.",
                                 Toast.LENGTH_LONG).show();
                     } else if (which == 2) {
+                        showCloudSettings();
+                    } else if (which == 3) {
                         confirmMemoryDeletion();
                     } else {
                         new AlertDialog.Builder(this)
-                                .setTitle("عبود 0.1.0")
+                                .setTitle("عبود 0.2.0")
                                 .setMessage("نسخة أولية بواجهة عربية، تعرف صوتي عبر خدمة الهاتف، نطق عربي حسب محرك الجهاز، وأوامر أساسية وذاكرة ملاحظات محلية. لا تحتوي هذه النسخة بعد على نموذج ذكاء اصطناعي محلي أو سحابي.")
                                 .setPositiveButton("حسناً", null)
                                 .show();
@@ -507,8 +559,63 @@ public class MainActivity extends Activity {
                 .show();
     }
 
+    private void showCloudSettings() {
+        LinearLayout form = new LinearLayout(this);
+        form.setOrientation(LinearLayout.VERTICAL);
+        form.setPadding(dp(20), dp(8), dp(20), dp(4));
+
+        TextView info = new TextView(this);
+        info.setText("عند تفعيل العقل السحابي، يُرسل نص السؤال الحالي إلى مزود الذكاء الاصطناعي. لا تُرسل الملاحظات المحفوظة أو المحادثات السابقة تلقائياً. استخدم HTTPS ومزوداً تثق به.");
+        info.setTextSize(13);
+        info.setTextColor(Color.DKGRAY);
+        form.addView(info);
+
+        EditText endpoint = new EditText(this);
+        endpoint.setSingleLine(true);
+        endpoint.setText(secureConfig.getEndpoint());
+        endpoint.setHint("رابط API المتوافق مع Chat Completions");
+        form.addView(endpoint);
+
+        EditText model = new EditText(this);
+        model.setSingleLine(true);
+        model.setText(secureConfig.getModel());
+        model.setHint("اسم النموذج لدى المزود");
+        form.addView(model);
+
+        EditText apiKey = new EditText(this);
+        apiKey.setSingleLine(true);
+        apiKey.setInputType(129);
+        apiKey.setHint("مفتاح API (اتركه فارغاً للاحتفاظ بالمفتاح المحفوظ)");
+        form.addView(apiKey);
+
+        CheckBox enabled = new CheckBox(this);
+        enabled.setText("تفعيل العقل السحابي للأسئلة العامة");
+        enabled.setChecked(secureConfig.isCloudEnabled());
+        form.addView(enabled);
+
+        new AlertDialog.Builder(this)
+                .setTitle("إعداد العقل السحابي")
+                .setView(form)
+                .setNegativeButton("إلغاء", null)
+                .setPositiveButton("حفظ", (dialog, which) -> {
+                    try {
+                        secureConfig.save(
+                                endpoint.getText().toString(),
+                                model.getText().toString(),
+                                apiKey.getText().toString(),
+                                enabled.isChecked()
+                        );
+                        Toast.makeText(this, "تم حفظ إعدادات العقل السحابي على الجهاز.", Toast.LENGTH_LONG).show();
+                    } catch (Exception e) {
+                        Toast.makeText(this, "لم تحفظ الإعدادات: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                    }
+                })
+                .show();
+    }
+
     @Override
     protected void onDestroy() {
+        brainExecutor.shutdownNow();
         if (textToSpeech != null) {
             textToSpeech.stop();
             textToSpeech.shutdown();
